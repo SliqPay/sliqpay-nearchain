@@ -11,7 +11,7 @@ export const viewport: Viewport = { width: 'device-width', initialScale: 1 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body className="min-h-screen bg-white dark:bg-gray-900 antialiased">
         <NearWalletProvider>{children}</NearWalletProvider>
       </body>
