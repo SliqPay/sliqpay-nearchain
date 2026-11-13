@@ -6,15 +6,16 @@ export interface Network {
   code: NetworkCode;
   name: string;
   serviceID: string;
+  dataServiceID: string; // VTPass service ID for data bundles
   /** Optional: copy sliqpay-frontend/public/product-logos/* into public/product-logos/. */
   logo?: string;
 }
 
 export const NETWORKS: Network[] = [
-  { code: 'MTN', name: 'MTN', serviceID: 'mtn', logo: '/product-logos/mtn.jpg' },
-  { code: 'AIRTEL', name: 'AIRTEL', serviceID: 'airtel', logo: '/product-logos/airtel.jpg' },
-  { code: 'GLO', name: 'GLO', serviceID: 'glo', logo: '/product-logos/glo.jpg' },
-  { code: '9MOBILE', name: '9MOBILE (T2)', serviceID: 'etisalat' },
+  { code: 'MTN', name: 'MTN', serviceID: 'mtn', dataServiceID: 'mtn-data', logo: '/product-logos/mtn.jpg' },
+  { code: 'AIRTEL', name: 'AIRTEL', serviceID: 'airtel', dataServiceID: 'airtel-data', logo: '/product-logos/airtel.jpg' },
+  { code: 'GLO', name: 'GLO', serviceID: 'glo', dataServiceID: 'glo-data', logo: '/product-logos/glo.jpg' },
+  { code: '9MOBILE', name: '9MOBILE (T2)', serviceID: 'etisalat', dataServiceID: 'etisalat-data' },
 ];
 
 export function networkByCode(code: string): Network | undefined {

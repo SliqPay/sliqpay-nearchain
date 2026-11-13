@@ -7,6 +7,9 @@ import { recipientProblem, settlementChainOf } from '../settlement-chain';
  * the same rule as sliqpay-backend. See .env.example for what each one means.
  */
 const schema = z.object({
+  // Payment mode: 'oneclick' (swap via NEAR Intents) or 'direct' (wNEAR straight to recipient)
+  PAYMENT_MODE: z.enum(['oneclick', 'direct']).default('oneclick'),
+  
   // NEAR Intents 1Click
   ONECLICK_BASE_URL: z.string().url().default('https://1click.chaindefuser.com'),
   // Partner key from partners.near-intents.org. ONECLICK_API_KEY (sent as X-API-Key) is what

@@ -80,6 +80,61 @@ export function buyAirtime(params: { requestId: string; serviceID: string; amoun
   });
 }
 
+export function buyData(params: {
+  requestId: string;
+  serviceID: string;
+  variationCode: string;
+  amount: number;
+  phone: string;
+}) {
+  return post('/pay', {
+    request_id: params.requestId,
+    serviceID: params.serviceID,
+    billersCode: params.phone,
+    variation_code: params.variationCode,
+    amount: params.amount,
+    phone: params.phone,
+  });
+}
+
+export function verifyMeter(params: { serviceID: string; billersCode: string; type: string }) {
+  return post('/merchant-verify', {
+    serviceID: params.serviceID,
+    billersCode: params.billersCode,
+    type: params.type,
+  });
+}
+
+export function buyElectricity(params: {
+  requestId: string;
+  serviceID: string;
+  variationCode: string;
+  amount: number;
+  billersCode: string;
+  phone: string;
+}) {
+  return post('/pay', {
+    request_id: params.requestId,
+    serviceID: params.serviceID,
+    billersCode: params.billersCode,
+    variation_code: params.variationCode,
+    amount: params.amount,
+    phone: params.phone,
+  });
+}
+
+/** Extract the electricity token from VTPass response */
+export function vtpassToken(result: unknown): string | undefined {
+  const r = rec(result);
+  const token = rec(rec(r.content).transactions).token;
+  const purchased_code = rec(r.purchased_code).purchased_code;
+  return token !== undefined && token !== null
+    ? String(token)
+    : purchased_code !== undefined && purchased_code !== null
+    ? String(purchased_code)
+    : undefined;
+}
+
 export function requery(requestId: string) {
   return post('/requery', { request_id: requestId });
 }

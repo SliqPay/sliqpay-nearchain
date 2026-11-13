@@ -23,11 +23,17 @@ export interface Order {
   network: string;
   serviceID: string;
   phone: string;
+  service?: 'airtime' | 'data' | 'electricity'; // type of service, defaults to airtime
+  variationCode?: string; // for data bundles and electricity type
+  meterNumber?: string; // for electricity
   amountNgn: number;
   feeNgn: number;
   ngnPerUsdc: number;
   /** USDC the bill needs, smallest units. */
   usdcRequired: string;
+  /** Payment mode: oneclick (1Click swap) or direct (wNEAR to recipient) */
+  paymentMode?: 'oneclick' | 'direct';
+  /** For direct mode: SliqPay's NEAR account. For oneclick: 1Click deposit address. */
   depositAddress: string;
   /** What the user must send, in the origin token's smallest units (yoctoNEAR for wNEAR). */
   amountIn: string;
@@ -38,6 +44,12 @@ export interface Order {
   deadline: string;
   status: OrderStatus;
   depositTxHash?: string;
+  /** Direct payment verification result */
+  verification?: {
+    verified: boolean;
+    actualAmount?: string;
+    reason?: string;
+  };
   swap?: {
     status: string;
     amountOut?: string;
@@ -50,6 +62,7 @@ export interface Order {
     outcome?: string;
     description?: string;
     transactionId?: string;
+    token?: string; // electricity token
   };
   note?: string;
   updatedAt: string;

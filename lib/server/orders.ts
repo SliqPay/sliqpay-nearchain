@@ -10,6 +10,9 @@ import { networkByCode, isValidNigerianPhone } from '../networks';
 import { ceilUnits } from '../units';
 import { settlementChainOf } from '../settlement-chain';
 import { FINAL_STATUSES, type Order, type OrderStatus } from '../order-types';
+import { findDataPlan } from '../data-plans';
+import { providerByCode, isValidMeterNumber, type MeterType } from '../electricity';
+import { verifyWnearTransfer } from './near-rpc';
 
 /**
  * The order lifecycle. One rule carried over from sliqpay-backend: nothing advances on
@@ -39,33 +42,102 @@ export async function loadOrder(id: string): Promise<Order | null> {
 
 export interface CreateOrderInput {
   accountId: string;
-  network: string;
+  service?: 'airtime' | 'data' | 'electricity';
+  network?: string; // for airtime/data
   phone: string;
-  amountNgn: number;
+  amountNgn?: number; // for airtime and electricity (custom amounts)
+  variationCode?: string; // for data plans and electricity type (prepaid/postpaid)
+  provider?: string; // for electricity
+  meterNumber?: string; // for electricity
 }
 
-/** Price the bill, ask 1Click for a deposit address, and record the order. */
+/** Price the bill, get payment details (1Click or direct), and record the order. */
 export async function createOrder(input: CreateOrderInput): Promise<Order> {
   const e = env();
-  const network = networkByCode(input.network);
-  if (!network) throw new OrderError('Pick a network');
-  if (!isValidNigerianPhone(input.phone)) throw new OrderError('Enter a valid 11-digit Nigerian phone number');
-  const { minAmountNgn, maxAmountNgn, rate } = await orderLimits();
-  if (!Number.isInteger(input.amountNgn) || input.amountNgn < minAmountNgn || input.amountNgn > maxAmountNgn) {
-    throw new OrderError(`Enter an amount between ₦${minAmountNgn.toLocaleString()} and ₦${maxAmountNgn.toLocaleString()}`);
+  const service = input.service || 'airtime';
+  
+  // Validate based on service type
+  if (service === 'airtime' || service === 'data') {
+    const network = networkByCode(input.network || '');
+    if (!network) throw new OrderError('Pick a network');
+    if (!isValidNigerianPhone(input.phone)) throw new OrderError('Enter a valid 11-digit Nigerian phone number');
+  } else if (service === 'electricity') {
+    const provider = providerByCode(input.provider || '');
+    if (!provider) throw new OrderError('Pick an electricity provider');
+    if (!isValidMeterNumber(input.meterNumber || '')) throw new OrderError('Enter a valid meter number (11-13 digits)');
+    if (!input.variationCode) throw new OrderError('Select meter type (prepaid or postpaid)');
   }
+  
+  const { minAmountNgn, maxAmountNgn, rate } = await orderLimits();
+  
+  // Determine the bill amount based on service type
+  let amountNgn: number;
+  let serviceID: string;
+  let variationCode: string | undefined;
+  let networkCode: string | undefined;
+  let meterNumber: string | undefined;
+  
+  if (service === 'data') {
+    const network = networkByCode(input.network!)!;
+    const plan = findDataPlan(network.dataServiceID, input.variationCode || '');
+    if (!plan) throw new OrderError('Select a data plan');
+    amountNgn = plan.amountNgn;
+    serviceID = network.dataServiceID;
+    variationCode = plan.variationCode;
+    networkCode = network.code;
+  } else if (service === 'electricity') {
+    const provider = providerByCode(input.provider!)!;
+    amountNgn = input.amountNgn || 0;
+    if (!Number.isInteger(amountNgn) || amountNgn < minAmountNgn || amountNgn > maxAmountNgn) {
+      throw new OrderError(`Enter an amount between ₦${minAmountNgn.toLocaleString()} and ₦${maxAmountNgn.toLocaleString()}`);
+    }
+    serviceID = provider.serviceID;
+    variationCode = input.variationCode; // prepaid or postpaid
+    meterNumber = input.meterNumber;
+  } else {
+    // airtime
+    const network = networkByCode(input.network!)!;
+    amountNgn = input.amountNgn || 0;
+    if (!Number.isInteger(amountNgn) || amountNgn < minAmountNgn || amountNgn > maxAmountNgn) {
+      throw new OrderError(`Enter an amount between ₦${minAmountNgn.toLocaleString()} and ₦${maxAmountNgn.toLocaleString()}`);
+    }
+    serviceID = network.serviceID;
+    networkCode = network.code;
+  }
+  
   if (!/^[a-z0-9._-]{2,64}$/.test(input.accountId)) throw new OrderError('Connect a NEAR wallet first');
 
-  const fee = sliqFee(input.amountNgn);
+  const fee = sliqFee(amountNgn);
   // The buffer covers the rate moving between quote and delivery; anything left over
   // stays with us, exactly as a margin would.
-  const usd = ((input.amountNgn + fee) / rate) * (1 + e.PRICE_BUFFER_BPS / 10_000);
+  const usd = ((amountNgn + fee) / rate) * (1 + e.PRICE_BUFFER_BPS / 10_000);
   const usdcRequired = ceilUnits(usd, e.SETTLEMENT_DECIMALS);
 
   const deadline = new Date(Date.now() + 30 * 60_000);
-  const quote = e.ONECLICK_SWAP_TYPE === 'EXACT_OUTPUT'
-    ? await oneclick.requestQuote({ swapType: 'EXACT_OUTPUT', amount: usdcRequired, refundTo: input.accountId, deadline })
-    : await exactInputQuote(usdcRequired, input.accountId, deadline);
+  const paymentMode = e.PAYMENT_MODE;
+  
+  let depositAddress: string;
+  let amountIn: string;
+  let amountInFormatted: string;
+  
+  if (paymentMode === 'direct') {
+    // Direct payment: send wNEAR straight to SETTLEMENT_RECIPIENT
+    depositAddress = e.SETTLEMENT_RECIPIENT;
+    // Convert USDC to NEAR (simplified: using 1Click token prices would be better)
+    const nearPrice = 2.85; // Approximate, should fetch from CoinGecko or 1Click
+    const nearAmount = (usd / nearPrice) * 1.02; // 2% buffer for price movement
+    const yoctoNear = ceilUnits(nearAmount, 24); // NEAR has 24 decimals
+    amountIn = yoctoNear;
+    amountInFormatted = (Number(yoctoNear) / 1e24).toFixed(4);
+  } else {
+    // 1Click swap
+    const quote = e.ONECLICK_SWAP_TYPE === 'EXACT_OUTPUT'
+      ? await oneclick.requestQuote({ swapType: 'EXACT_OUTPUT', amount: usdcRequired, refundTo: input.accountId, deadline })
+      : await exactInputQuote(usdcRequired, input.accountId, deadline);
+    depositAddress = quote.depositAddress!;
+    amountIn = quote.amountIn;
+    amountInFormatted = quote.amountInFormatted;
+  }
 
   const now = new Date().toISOString();
   return save({
@@ -73,19 +145,23 @@ export async function createOrder(input: CreateOrderInput): Promise<Order> {
     createdAt: now,
     updatedAt: now,
     accountId: input.accountId,
-    network: network.code,
-    serviceID: network.serviceID,
+    service,
+    network: networkCode || '',
+    serviceID,
     phone: input.phone,
-    amountNgn: input.amountNgn,
+    variationCode,
+    meterNumber,
+    amountNgn,
     feeNgn: fee,
     ngnPerUsdc: rate,
     usdcRequired,
-    depositAddress: quote.depositAddress!,
-    amountIn: quote.amountIn,
-    amountInFormatted: quote.amountInFormatted,
+    paymentMode,
+    depositAddress,
+    amountIn,
+    amountInFormatted,
     originAsset: e.ORIGIN_ASSET,
-    settlementChain: settlementChainOf(e.SETTLEMENT_ASSET),
-    deadline: quote.deadline ?? deadline.toISOString(),
+    settlementChain: paymentMode === 'direct' ? 'near' : settlementChainOf(e.SETTLEMENT_ASSET),
+    deadline: deadline.toISOString(),
     status: 'AWAITING_DEPOSIT',
   });
 }
@@ -146,13 +222,42 @@ export async function advance(id: string): Promise<Order> {
   if (!order) throw new OrderError('Order not found', 404);
   if (FINAL_STATUSES.includes(order.status)) return order;
 
-  if (order.status === 'AWAITING_DEPOSIT' || order.status === 'SWAPPING' || order.status === 'INCOMPLETE_DEPOSIT') {
-    order = await checkSwap(order);
+  // Direct payment mode: verify the transaction on-chain
+  if (order.paymentMode === 'direct' && order.depositTxHash && !order.verification) {
+    order = await verifyDirectPayment(order);
   }
+
+  if (order.status === 'AWAITING_DEPOSIT' || order.status === 'SWAPPING' || order.status === 'INCOMPLETE_DEPOSIT') {
+    if (order.paymentMode === 'direct') {
+      // For direct mode, if verified, move straight to PAID
+      if (order.verification?.verified) {
+        order.status = 'PAID';
+        order = await save(order);
+      }
+    } else {
+      // 1Click swap mode
+      order = await checkSwap(order);
+    }
+  }
+  
   if (order.status === 'PAID' || order.status === 'DELIVERING') {
     order = await deliver(order);
   }
   return order;
+}
+
+async function verifyDirectPayment(order: Order): Promise<Order> {
+  if (!order.depositTxHash) return order;
+  
+  const verification = await verifyWnearTransfer({
+    txHash: order.depositTxHash,
+    sender: order.accountId,
+    recipient: order.depositAddress,
+    minAmount: order.amountIn,
+  });
+  
+  order.verification = verification;
+  return save(order);
 }
 
 async function checkSwap(order: Order): Promise<Order> {
@@ -190,7 +295,7 @@ async function checkSwap(order: Order): Promise<Order> {
 }
 
 /**
- * Buy the airtime exactly once. The request_id is chosen and CLAIMED before VTPass is
+ * Buy the service exactly once. The request_id is chosen and CLAIMED before VTPass is
  * called (persist intent → call → persist outcome), so a crash or a second tab can
  * only ever re-ask VTPass about the same request_id — which VTPass dedupes.
  */
@@ -209,12 +314,36 @@ async function deliver(order: Order): Promise<Order> {
     if (!won) return order; // someone else is buying; we will read their outcome next poll
 
     try {
-      const result = await vtpass.buyAirtime({
-        requestId: claimed,
-        serviceID: order.serviceID,
-        amount: order.amountNgn,
-        phone: order.phone,
-      });
+      let result: unknown;
+      const service = order.service || 'airtime';
+      
+      if (service === 'data') {
+        result = await vtpass.buyData({
+          requestId: claimed,
+          serviceID: order.serviceID,
+          variationCode: order.variationCode!,
+          amount: order.amountNgn,
+          phone: order.phone,
+        });
+      } else if (service === 'electricity') {
+        result = await vtpass.buyElectricity({
+          requestId: claimed,
+          serviceID: order.serviceID,
+          variationCode: order.variationCode!,
+          amount: order.amountNgn,
+          billersCode: order.meterNumber!,
+          phone: order.phone,
+        });
+      } else {
+        // airtime
+        result = await vtpass.buyAirtime({
+          requestId: claimed,
+          serviceID: order.serviceID,
+          amount: order.amountNgn,
+          phone: order.phone,
+        });
+      }
+      
       return settleDelivery(order, result);
     } catch {
       return order; // timed out: unknown, so requery on the next poll — never re-buy
@@ -232,11 +361,13 @@ async function deliver(order: Order): Promise<Order> {
 
 async function settleDelivery(order: Order, result: unknown): Promise<Order> {
   const outcome = vtpass.interpretVTPass(result);
+  const token = (order.service === 'electricity') ? vtpass.vtpassToken(result) : undefined;
   order.vtpass = {
     requestId: order.vtpass!.requestId,
     outcome,
     description: vtpass.vtpassDescription(result),
     transactionId: vtpass.vtpassTransactionId(result),
+    token,
   };
   if (outcome === 'success') order.status = 'DELIVERED';
   else if (outcome === 'failed') order.status = 'DELIVERY_FAILED';
